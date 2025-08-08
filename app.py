@@ -8,19 +8,14 @@ WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 
 app = FastAPI()
-
-# Создаём приложение бота
 application = ApplicationBuilder().token(TOKEN).build()
 
-# Подключаем логику из bot_logic.py
 from bot_logic import register_handlers
 register_handlers(application)
-
 
 @app.get("/")
 async def root():
     return {"ok": True}
-
 
 @app.post("/telegram/webhook")
 async def telegram_webhook(request: Request):
@@ -28,17 +23,30 @@ async def telegram_webhook(request: Request):
         secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
         if secret != WEBHOOK_SECRET:
             return {"ok": False}
+
     data = await request.json()
     update = Update.de_json(data, application.bot)
-    await application.process_update(update)
-    return {"ok": True}
 
+    try:
+        await application.process_update(update)
+    except RuntimeError as e:
+        # Если бот не был инициализирован, логируем и игнорируем апдейт
+        print(f"[ERROR] Bot not initialized: {e}")
+        return {"ok": False}
+    except Exception as e:
+        print(f"[ERROR] Unexpected error: {e}")
+        return {"ok": False}
+
+    return {"ok": True}
 
 @app.on_event("startup")
 async def on_startup():
-    # Обязательная инициализация бота для PTB 21.x
-    await application.initialize()
-    await application.start()
+    try:
+        await application.initialize()
+        print("✅ Application initialized")
+    except Exception as e:
+        print(f"[ERROR] Failed to initialize bot: {e}")
+        return
 
     if not WEBHOOK_URL:
         print("WEBHOOK_URL не задан — пропускаю setWebhook")
@@ -51,8 +59,6 @@ async def on_startup():
     )
     print("Webhook set ->", f"{WEBHOOK_URL}/telegram/webhook")
 
-
 @app.on_event("shutdown")
 async def on_shutdown():
-    await application.stop()
-    await application.shutdown()
+    await application.bot.delete_webhook()
