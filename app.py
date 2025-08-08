@@ -1,64 +1,38 @@
 import os
+import asyncio
 from fastapi import FastAPI, Request
 from telegram import Update
-from telegram.ext import ApplicationBuilder
+from telegram.ext import Application
+from bot_logic import register_handlers  # подключаем хендлеры из bot_logic.py
 
-TOKEN = os.environ["TELEGRAM_TOKEN"]
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
-WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+
+if not TOKEN:
+    raise ValueError("Не указан TELEGRAM_TOKEN в переменных окружения Render")
 
 app = FastAPI()
-application = ApplicationBuilder().token(TOKEN).build()
 
-from bot_logic import register_handlers
-register_handlers(application)
-
-@app.get("/")
-async def root():
-    return {"ok": True}
-
-@app.post("/telegram/webhook")
-async def telegram_webhook(request: Request):
-    if WEBHOOK_SECRET:
-        secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-        if secret != WEBHOOK_SECRET:
-            return {"ok": False}
-
-    data = await request.json()
-    update = Update.de_json(data, application.bot)
-
-    try:
-        await application.process_update(update)
-    except RuntimeError as e:
-        # Если бот не был инициализирован, логируем и игнорируем апдейт
-        print(f"[ERROR] Bot not initialized: {e}")
-        return {"ok": False}
-    except Exception as e:
-        print(f"[ERROR] Unexpected error: {e}")
-        return {"ok": False}
-
-    return {"ok": True}
+# Создаем приложение Telegram
+telegram_app = Application.builder().token(TOKEN).build()
+register_handlers(telegram_app)  # подключаем все хендлеры
 
 @app.on_event("startup")
 async def on_startup():
-    try:
-        await application.initialize()
-        print("✅ Application initialized")
-    except Exception as e:
-        print(f"[ERROR] Failed to initialize bot: {e}")
-        return
+    """Устанавливаем вебхук при запуске на Render."""
+    await telegram_app.bot.set_webhook(f"{WEBHOOK_URL}/telegram/webhook")
+    print(f"Webhook установлен -> {WEBHOOK_URL}/telegram/webhook")
 
-    if not WEBHOOK_URL:
-        print("WEBHOOK_URL не задан — пропускаю setWebhook")
-        return
+@app.post("/telegram/webhook")
+async def telegram_webhook(request: Request):
+    """Обработка апдейтов от Telegram через вебхук."""
+    data = await request.json()
+    update = Update.de_json(data, telegram_app.bot)
+    await telegram_app.initialize()
+    await telegram_app.process_update(update)
+    return {"ok": True}
 
-    await application.bot.set_webhook(
-        url=f"{WEBHOOK_URL}/telegram/webhook",
-        secret_token=WEBHOOK_SECRET or None,
-        drop_pending_updates=True,
-    )
-    print("Webhook set ->", f"{WEBHOOK_URL}/telegram/webhook")
-
-@app.on_event("shutdown")
-async def on_shutdown():
-    await application.bot.delete_webhook()
+@app.get("/")
+async def root():
+    """Проверка, что сервер запущен."""
+    return {"status": "бот работает"}
