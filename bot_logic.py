@@ -10,31 +10,30 @@ from io import BytesIO
 from datetime import datetime
 import os
 import sys
+import logging
+
+# === Логирование (видно в Render -> Logs) ===
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # === Стейты ===
 NUM, DATE, FROM, TO, CAR, PLATE, ITEM_NAME, ITEM_UNIT, ITEM_QTY, ASK_MORE, EDIT_FIELD, EDIT_VALUE = range(12)
 
 # === Константы ===
 FROM_LIST = [
-    "Склад OOO SULTON-O'KTAM Ташкентская Область",
-    "Склад OOO SULTON-O'KTAM город Ташкент"
+    "Склад OOO SUlLTON-O'KTAM Ташкентская Область",
+    "Склад OOO SUlLTON-O'KTAM город Ташкент"
 ]
-TO_LIST = ["Склад Темирйолтамин город Ташкент",
-           "Склад Темирйолинфратузилма город Ташкент",
-           "Склад OOO SULTON-O'KTAM Ташкентская Область",
-           "Склад OOO SULTON-O'KTAM город Ташкент"]
-ITEM_LIST = ["Аккумуляторная батарея 12V-264",
-             "Аккумуляторная батарея 4V-450",
-             "Аккумуляторная батарея 2V-850",
-             "Аккумуляторная батарея НК 1,2V-125",
-             "Аккумуляторная батарея НК 1,2V-180",
-             "Аккумуляторная батарея НК 1,2V-55"]
-UNIT_LIST = ["шт", "л", "кг", "комлпект"]
+TO_LIST = ["Склад Темирйолтамин"]
+ITEM_LIST = ["Аккумуляторная батарея 12V-264"]
+UNIT_LIST = ["шт", "л"]
 
-# Чат для итогового сообщения (ENV)
+BTN_NEW_INVOICE = "Сформировать новую накладную"
+
 TARGET_CHAT_ID = int(os.environ.get("TARGET_CHAT_ID", "-1002589936295"))
+ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "0"))  # поставь свой user id, если хочешь ограничить /restart
 
-# === Генерация PDF ===
+# === PDF ===
 def generate_pdf(data):
     try:
         buffer = BytesIO()
@@ -80,35 +79,44 @@ def generate_pdf(data):
             c.line(x, height - 180, x, y)
 
         y -= 40
-        c.drawString(50, y, "Отпустил ___________________________________________________________")
+        c.drawString(50, y, "Отпустил _____________________________")
         y -= 30
-        c.drawString(50, y, "Принял  ____________________________________________________________")
+        c.drawString(50, y, "Принял  _____________________________")
 
         c.save()
         buffer.seek(0)
         return buffer
     except Exception as e:
-        print(f"Ошибка при генерации PDF: {e}")
+        logger.error(f"Ошибка при генерации PDF: {e}")
         return None
 
-# === Хендлеры ===
+# === ЕДИНЫЙ СБРОС + СТАРТ ВВОДА НОМЕРА ===
+async def start_new_invoice_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    context.user_data['items'] = []
+    await update.message.reply_text("Введите № накладной:", reply_markup=ReplyKeyboardRemove())
+
+# === Команды ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.clear()
-    context.user_data['items'] = []
-    await update.message.reply_text("Введите № накладной:", reply_markup=ReplyKeyboardRemove())
+    await start_new_invoice_flow(update, context)
     return NUM
 
-async def new_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.clear()
-    context.user_data['items'] = []
-    await update.message.reply_text("Введите № накладной:", reply_markup=ReplyKeyboardRemove())
+async def new_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await start_new_invoice_flow(update, context)
     return NUM
 
-async def restart_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("♻ Перезапуск бота...")
+async def restart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id if update.effective_user else 0
+    if ADMIN_USER_ID and uid != ADMIN_USER_ID:
+        await update.message.reply_text("Команда /restart доступна только администратору.")
+        return ConversationHandler.END
+    await update.message.reply_text("♻ Перезапускаю бота…")
+    logger.warning(f"/restart от {uid}: завершаем процесс для рестарта")
     sys.stdout.flush()
-    sys.exit(0)
+    sys.stderr.flush()
+    os._exit(0)
 
+# === Шаги сценария ===
 async def get_num(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['num'] = update.message.text
     today = datetime.now().strftime("%d.%m.%Y")
@@ -167,28 +175,28 @@ async def get_item_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(summary)
 
-    keyboard = ReplyKeyboardMarkup([
-        ["Добавить товар"],
-        ["Отправить данные"]
-    ], resize_keyboard=True)
-
+    keyboard = ReplyKeyboardMarkup(
+        [["Добавить товар"], ["Отправить данные"], [BTN_NEW_INVOICE]],
+        resize_keyboard=True
+    )
     await update.message.reply_text("Что дальше?", reply_markup=keyboard)
     return ASK_MORE
 
 async def ask_more(update: Update, context: ContextTypes.DEFAULT_TYPE):
     choice = update.message.text
+
     if choice == "Добавить товар":
         keyboard = ReplyKeyboardMarkup([[name] for name in ITEM_LIST], resize_keyboard=True, one_time_keyboard=True)
         await update.message.reply_text("Наименование товара:", reply_markup=keyboard)
         return ITEM_NAME
+
     elif choice == "Отправить данные":
         data = context.user_data
-        item_lines = "\n".join([
-            f"{i+1}. {item['name']} | {item['unit']} | {item['qty']}"
-            for i, item in enumerate(data['items'])
-        ])
+        item_lines = "\n".join(
+            [f"{i+1}. {item['name']} | {item['unit']} | {item['qty']}" for i, item in enumerate(data['items'])]
+        )
         summary = (
-            f"📄 Предпросмотр данных накладной:\n"
+            "📄 Предпросмотр данных накладной:\n"
             f"Накладная №{data['num']} от {data['date']}\n"
             f"Откуда: {data['from']}\n"
             f"Куда: {data['to']}\n"
@@ -196,47 +204,54 @@ async def ask_more(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Гос. номер: {data['plate']}\n"
             f"Товары:\n{item_lines}"
         )
-        keyboard = ReplyKeyboardMarkup([
-            ["Сформировать накладную"],
-            ["Изменить данные"]
-        ], resize_keyboard=True)
+        keyboard = ReplyKeyboardMarkup(
+            [["Сформировать накладную"], ["Изменить данные"], [BTN_NEW_INVOICE]],
+            resize_keyboard=True
+        )
         await update.message.reply_text("🔍 Проверка данных:")
         await update.message.reply_text(summary, reply_markup=keyboard)
         return ASK_MORE
+
     elif choice == "Изменить данные":
-        keyboard = ReplyKeyboardMarkup([
-            ["№ накладной", "Дата"],
-            ["Откуда", "Куда"],
-            ["Автомобиль", "Гос. номер"],
-            ["Наименование", "Ед. изм.", "Количество"]
-        ], resize_keyboard=True)
+        keyboard = ReplyKeyboardMarkup(
+            [["№ накладной", "Дата"],
+             ["Откуда", "Куда"],
+             ["Автомобиль", "Гос. номер"],
+             ["Наименование", "Ед. изм.", "Количество"],
+             [BTN_NEW_INVOICE]],
+            resize_keyboard=True
+        )
         await update.message.reply_text("Что вы хотите изменить?", reply_markup=keyboard)
         return EDIT_FIELD
+
     elif choice == "Сформировать накладную":
         pdf = generate_pdf(context.user_data)
         if pdf:
-            await update.message.reply_document(document=InputFile(pdf, filename="nakladnaya.pdf"))
-            text = (
-                f"📤 Накладная №{context.user_data['num']} от {context.user_data['date']}\n"
-                f"Откуда: {context.user_data['from']}\n"
-                f"Куда: {context.user_data['to']}\n"
-                f"Авто: {context.user_data['car']} | Гос. номер: {context.user_data['plate']}\n"
-                + "\n".join([
-                    f"{i+1}. {item['name']} — {item['qty']} {item['unit']}"
-                    for i, item in enumerate(context.user_data['items'])
-                ])
-            )
-            await context.bot.send_message(chat_id=TARGET_CHAT_ID, text=text)
+            try:
+                await update.message.reply_document(document=InputFile(pdf, filename="nakladnaya.pdf"))
+                text = (
+                    f"📤 Накладная №{context.user_data['num']} от {context.user_data['date']}\n"
+                    f"Откуда: {context.user_data['from']}\n"
+                    f"Куда: {context.user_data['to']}\n"
+                    f"Авто: {context.user_data['car']} | Гос. номер: {context.user_data['plate']}\n" +
+                    "\n".join([f"{i+1}. {item['name']} — {item['qty']} {item['unit']}"
+                               for i, item in enumerate(context.user_data['items'])])
+                )
+                await context.bot.send_message(chat_id=TARGET_CHAT_ID, text=text)
+            except Exception as e:
+                logger.error(f"Ошибка отправки PDF/сообщения в чат {TARGET_CHAT_ID}: {e}")
         else:
             await update.message.reply_text("⚠️ Ошибка при формировании PDF.")
-        keyboard = ReplyKeyboardMarkup([["Сформировать новую накладную"]], resize_keyboard=True)
-        await update.message.reply_text("✅ Готово! Хотите начать новую накладную?", reply_markup=keyboard)
+
+        # 👉 ЖЁСТКИЙ СТАРТ НОВОЙ НАКЛАДНОЙ
+        await start_new_invoice_flow(update, context)
         return NUM
-    elif choice == "Сформировать новую накладную":
-        context.user_data.clear()
-        context.user_data['items'] = []
-        await update.message.reply_text("Введите № накладной:", reply_markup=ReplyKeyboardRemove())
+
+    elif choice == BTN_NEW_INVOICE:
+        # Кнопка ручного сброса без формирования
+        await start_new_invoice_flow(update, context)
         return NUM
+
     else:
         await update.message.reply_text("Пожалуйста, выберите действие из предложенных.")
         return ASK_MORE
@@ -263,24 +278,25 @@ async def edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     if field in mapping:
         key = mapping[field]
-        if key in ["name", "unit", "qty"] and context.user_data['items']:
+        if key in ["name", "unit", "qty"] and context.user_data.get('items'):
             context.user_data['items'][-1][key] = value
         else:
             context.user_data[key] = value
-    await update.message.reply_text("✅ Обновлено.", reply_markup=ReplyKeyboardMarkup([
-        ["Отправить данные"]], resize_keyboard=True))
+    keyboard = ReplyKeyboardMarkup([["Отправить данные"], [BTN_NEW_INVOICE]], resize_keyboard=True)
+    await update.message.reply_text("✅ Обновлено.", reply_markup=keyboard)
     return ASK_MORE
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Отменено", reply_markup=ReplyKeyboardRemove())
+    await start_new_invoice_flow(update, context)
     return ConversationHandler.END
 
+# === Регистрация ===
 def register_handlers(app):
     conv = ConversationHandler(
         entry_points=[
             CommandHandler("start", start),
-            CommandHandler("new", new_invoice),
-            CommandHandler("restart", restart_bot)
+            CommandHandler("new", new_cmd),
+            CommandHandler("restart", restart_cmd),
         ],
         states={
             NUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_num)],
@@ -296,6 +312,7 @@ def register_handlers(app):
             EDIT_FIELD: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_field)],
             EDIT_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_value)],
         },
-        fallbacks=[CommandHandler("cancel", cancel)]
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,  # на всякий случай
     )
     app.add_handler(conv)
