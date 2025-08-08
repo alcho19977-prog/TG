@@ -8,11 +8,6 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from io import BytesIO
 import os
-import logging
-
-# === Логирование ===
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 # === Стейты ===
 NUM, DATE, FROM, TO, CAR, PLATE, ITEM_NAME, ITEM_UNIT, ITEM_QTY, ASK_MORE, EDIT_FIELD, EDIT_VALUE = range(12)
@@ -30,6 +25,7 @@ UNIT_LIST = ["шт", "л"]
 TARGET_CHAT_ID = int(os.environ.get("TARGET_CHAT_ID", "-1002589936295"))
 
 # === Генерация PDF ===
+
 def generate_pdf(data):
     try:
         buffer = BytesIO()
@@ -83,14 +79,25 @@ def generate_pdf(data):
         buffer.seek(0)
         return buffer
     except Exception as e:
-        logger.error(f"Ошибка при генерации PDF: {e}")
+        print(f"[ERROR] Ошибка при генерации PDF: {e}")
         return None
 
-# === Хендлеры ===
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# === Сброс данных ===
+
+def reset_invoice(context):
     context.user_data.clear()
     context.user_data['items'] = []
+
+# === Хендлеры ===
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    reset_invoice(context)
     await update.message.reply_text("Введите № накладной:", reply_markup=ReplyKeyboardRemove())
+    return NUM
+
+async def new_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    reset_invoice(context)
+    await update.message.reply_text("Начинаем новую накладную. Введите №:", reply_markup=ReplyKeyboardRemove())
     return NUM
 
 async def get_num(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -212,16 +219,13 @@ async def ask_more(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 await context.bot.send_message(chat_id=TARGET_CHAT_ID, text=text)
             except Exception as e:
-                logger.error(f"Ошибка отправки в чат {TARGET_CHAT_ID}: {e}")
+                print(f"[ERROR] Ошибка при отправке PDF или сообщения в чат: {e}")
         else:
             await update.message.reply_text("⚠️ Ошибка при формировании PDF.")
 
-        # 🔹 Очищаем все данные, чтобы новая накладная была с нуля
-        context.user_data.clear()
-        context.user_data['items'] = []
-
-        keyboard = ReplyKeyboardMarkup([["Сформировать новую поставку"]], resize_keyboard=True)
-        await update.message.reply_text("✅ Готово! Хотите начать новую поставку?", reply_markup=keyboard)
+        # Сброс данных
+        reset_invoice(context)
+        await update.message.reply_text("✅ Готово! Введите № накладной для новой поставки:", reply_markup=ReplyKeyboardRemove())
         return NUM
     else:
         await update.message.reply_text("Пожалуйста, выберите действие из предложенных.")
@@ -258,12 +262,18 @@ async def edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ASK_MORE
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    reset_invoice(context)
     await update.message.reply_text("Отменено", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
+# === Регистрация ===
+
 def register_handlers(app):
     conv = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
+        entry_points=[
+            CommandHandler("start", start),
+            CommandHandler("new", new_invoice)
+        ],
         states={
             NUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_num)],
             DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_date)],
