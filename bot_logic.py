@@ -1,6 +1,6 @@
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InputFile
 from telegram.ext import (
-    ApplicationBuilder, ContextTypes, ConversationHandler, MessageHandler, CommandHandler, filters
+    ContextTypes, ConversationHandler, MessageHandler, CommandHandler, filters
 )
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
@@ -8,12 +8,16 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from io import BytesIO
 import os
-import asyncio
+import logging
+
+# === Логирование ===
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # === Стейты ===
 NUM, DATE, FROM, TO, CAR, PLATE, ITEM_NAME, ITEM_UNIT, ITEM_QTY, ASK_MORE, EDIT_FIELD, EDIT_VALUE = range(12)
 
-# === Справочники ===
+# === Константы ===
 FROM_LIST = [
     "Склад OOO SUlLTON-O'KTAM Ташкентская Область",
     "Склад OOO SUlLTON-O'KTAM город Ташкент"
@@ -22,10 +26,10 @@ TO_LIST = ["Склад Темирйолтамин"]
 ITEM_LIST = ["Аккумуляторная батарея 12V-264"]
 UNIT_LIST = ["шт", "л"]
 
-# Чат для итогового сообщения (ENV с дефолтом)
+# Чат для итогового сообщения (ENV)
 TARGET_CHAT_ID = int(os.environ.get("TARGET_CHAT_ID", "-1002589936295"))
 
-# === PDF ===
+# === Генерация PDF ===
 def generate_pdf(data):
     try:
         buffer = BytesIO()
@@ -79,7 +83,7 @@ def generate_pdf(data):
         buffer.seek(0)
         return buffer
     except Exception as e:
-        print(f"Ошибка при генерации PDF: {e}")
+        logger.error(f"Ошибка при генерации PDF: {e}")
         return None
 
 # === Хендлеры ===
@@ -146,7 +150,11 @@ async def get_item_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(summary)
 
-    keyboard = ReplyKeyboardMarkup([["Добавить товар"], ["Отправить данные"]], resize_keyboard=True)
+    keyboard = ReplyKeyboardMarkup([
+        ["Добавить товар"],
+        ["Отправить данные"]
+    ], resize_keyboard=True)
+
     await update.message.reply_text("Что дальше?", reply_markup=keyboard)
     return ASK_MORE
 
@@ -158,7 +166,10 @@ async def ask_more(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ITEM_NAME
     elif choice == "Отправить данные":
         data = context.user_data
-        item_lines = "\n".join([f"{i+1}. {item['name']} | {item['unit']} | {item['qty']}" for i, item in enumerate(data['items'])])
+        item_lines = "\n".join([
+            f"{i+1}. {item['name']} | {item['unit']} | {item['qty']}"
+            for i, item in enumerate(data['items'])
+        ])
         summary = (
             f"📄 Предпросмотр данных накладной:\n"
             f"Накладная №{data['num']} от {data['date']}\n"
@@ -168,7 +179,10 @@ async def ask_more(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Гос. номер: {data['plate']}\n"
             f"Товары:\n{item_lines}"
         )
-        keyboard = ReplyKeyboardMarkup([["Сформировать накладную"], ["Изменить данные"]], resize_keyboard=True)
+        keyboard = ReplyKeyboardMarkup([
+            ["Сформировать накладную"],
+            ["Изменить данные"]
+        ], resize_keyboard=True)
         await update.message.reply_text("🔍 Проверка данных:")
         await update.message.reply_text(summary, reply_markup=keyboard)
         return ASK_MORE
@@ -184,17 +198,28 @@ async def ask_more(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif choice == "Сформировать накладную":
         pdf = generate_pdf(context.user_data)
         if pdf:
-            await update.message.reply_document(document=InputFile(pdf, filename="nakladnaya.pdf"))
-            text = (
-                f"📤 Накладная №{context.user_data['num']} от {context.user_data['date']}\n"
-                f"Откуда: {context.user_data['from']}\n"
-                f"Куда: {context.user_data['to']}\n"
-                f"Авто: {context.user_data['car']} | Гос. номер: {context.user_data['plate']}\n"
-                + "\n".join([f"{i+1}. {item['name']} — {item['qty']} {item['unit']}" for i, item in enumerate(context.user_data['items'])])
-            )
-            await context.bot.send_message(chat_id=TARGET_CHAT_ID, text=text)
+            try:
+                await update.message.reply_document(document=InputFile(pdf, filename="nakladnaya.pdf"))
+                text = (
+                    f"📤 Накладная №{context.user_data['num']} от {context.user_data['date']}\n"
+                    f"Откуда: {context.user_data['from']}\n"
+                    f"Куда: {context.user_data['to']}\n"
+                    f"Авто: {context.user_data['car']} | Гос. номер: {context.user_data['plate']}\n"
+                    + "\n".join([
+                        f"{i+1}. {item['name']} — {item['qty']} {item['unit']}"
+                        for i, item in enumerate(context.user_data['items'])
+                    ])
+                )
+                await context.bot.send_message(chat_id=TARGET_CHAT_ID, text=text)
+            except Exception as e:
+                logger.error(f"Ошибка отправки в чат {TARGET_CHAT_ID}: {e}")
         else:
             await update.message.reply_text("⚠️ Ошибка при формировании PDF.")
+
+        # 🔹 Очищаем все данные, чтобы новая накладная была с нуля
+        context.user_data.clear()
+        context.user_data['items'] = []
+
         keyboard = ReplyKeyboardMarkup([["Сформировать новую поставку"]], resize_keyboard=True)
         await update.message.reply_text("✅ Готово! Хотите начать новую поставку?", reply_markup=keyboard)
         return NUM
@@ -211,16 +236,25 @@ async def edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     field = context.user_data.get('edit_target')
     value = update.message.text
-    mapping = {"№ накладной": "num", "Дата": "date", "Откуда": "from", "Куда": "to",
-               "Автомобиль": "car", "Гос. номер": "plate", "Наименование": "name",
-               "Ед. изм.": "unit", "Количество": "qty"}
+    mapping = {
+        "№ накладной": "num",
+        "Дата": "date",
+        "Откуда": "from",
+        "Куда": "to",
+        "Автомобиль": "car",
+        "Гос. номер": "plate",
+        "Наименование": "name",
+        "Ед. изм.": "unit",
+        "Количество": "qty"
+    }
     if field in mapping:
         key = mapping[field]
         if key in ["name", "unit", "qty"] and context.user_data['items']:
             context.user_data['items'][-1][key] = value
         else:
             context.user_data[key] = value
-    await update.message.reply_text("✅ Обновлено.", reply_markup=ReplyKeyboardMarkup([["Отправить данные"]], resize_keyboard=True))
+    await update.message.reply_text("✅ Обновлено.", reply_markup=ReplyKeyboardMarkup([
+        ["Отправить данные"]], resize_keyboard=True))
     return ASK_MORE
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -247,13 +281,3 @@ def register_handlers(app):
         fallbacks=[CommandHandler("cancel", cancel)]
     )
     app.add_handler(conv)
-
-# === Локальный запуск (polling) ===
-if __name__ == "__main__":
-    token = os.environ.get("TELEGRAM_TOKEN")
-    if not token:
-        raise RuntimeError("Не задан TELEGRAM_TOKEN (ENV)")
-    app = ApplicationBuilder().token(token).build()
-    register_handlers(app)
-    print("Запускаю локально (polling)...")
-    app.run_polling()
